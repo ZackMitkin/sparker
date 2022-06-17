@@ -1,5 +1,7 @@
-from pyspark.sql import SparkSession
-from pyspark import SparkContext
+from typing import Tuple
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql.functions import col
+from pyspark import Row, SparkContext
 from .objects import Profile, MatchingEntities, KeyValue
 import json
 
@@ -92,7 +94,8 @@ class CSVWrapper(object):
             source identifier
         """
         sql_context = SparkSession.builder.getOrCreate()
-        df = sql_context.read.option("header", header).option("sep", separator).option("delimiter", "\"").csv(file_path)
+        df = sql_context.read.option("header", header).option(
+            "sep", separator).option("delimiter", "\"").csv(file_path)
         column_names = df.columns
 
         def row_to_attributes(row):
@@ -103,7 +106,8 @@ class CSVWrapper(object):
             attributes = data[0]
             real_id = ""
             if len(real_id_field) > 0:
-                real_id = "".join(map(lambda a: a.value, filter(lambda a: a.key == real_id_field, attributes))).strip()
+                real_id = "".join(map(lambda a: a.value, filter(
+                    lambda a: a.key == real_id_field, attributes))).strip()
 
             return Profile(profile_id, list(filter(lambda a: a.key != real_id_field, attributes)), real_id, source_id)
 
@@ -130,10 +134,11 @@ class CSVWrapper(object):
             if true means that the CSV has an header row
         """
         sql_context = SparkSession.builder.getOrCreate()
-        df = sql_context.read.option("header", header).option("sep", separator).csv(file_path)
+        df = sql_context.read.option("header", header).option(
+            "sep", separator).csv(file_path)
         return df.rdd.map(lambda row: MatchingEntities(row[id1], row[id2]))
-        
-        
+
+
 class PandasWrapper(object):
     """
     Wrapper to load the profiles from a CSV
@@ -175,7 +180,8 @@ class PandasWrapper(object):
             attributes = data[0]
             real_id = ""
             if len(real_id_field) > 0:
-                real_id = "".join(map(lambda a: a.value, filter(lambda a: a.key == real_id_field, attributes))).strip()
+                real_id = "".join(map(lambda a: a.value, filter(
+                    lambda a: a.key == real_id_field, attributes))).strip()
 
             return Profile(profile_id, list(filter(lambda a: a.key != real_id_field, attributes)), real_id, source_id)
 
@@ -206,3 +212,30 @@ class PandasWrapper(object):
             pandas_df[c] = pandas_df[c].astype(str)
         df = sql_context.createDataFrame(pandas_df)
         return df.rdd.map(lambda row: MatchingEntities(row[id1], row[id2]))
+
+
+class DataFrameWrapper(object):
+    @staticmethod
+    def load_profiles(df: DataFrame, start_id_from=0, real_id_field="", source_id=0, ignored_columns: list[str] = []):
+        column_names = df.columns
+
+        def row_to_attributes(row: Row):
+            def filter_condition(k: KeyValue):
+                # TODO: Perhaps remove date fields here too
+                return not k.is_empty() and k.key != real_id_field and k.key not in ignored_columns
+
+            attributes = list(filter(lambda k: filter_condition(k), [
+                KeyValue(c, row[c]) for c in column_names]))
+            return Row(real_id=row[real_id_field], attributes=attributes)
+
+        # cast all columns to string
+        df = df.select(
+            [col(c).cast("string") for c in column_names])
+
+        def get_profile(data: Tuple[Row, int]):
+            profile_id = data[1] + start_id_from
+            attributes = data[0]["attributes"]
+            real_id = data[0]["real_id"]
+            return Profile(profile_id, attributes, real_id, source_id)
+
+        return df.rdd.map(lambda row: row_to_attributes(row)).zipWithIndex().map(lambda x: get_profile(x))
